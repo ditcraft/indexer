@@ -1,0 +1,1282 @@
+package v1live
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log"
+	"math/big"
+	"os"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/ditcraft/indexer/database"
+	"gopkg.in/mgo.v2/bson"
+
+	"github.com/ditcraft/indexer/smartcontracts_v1/KNWToken"
+	"github.com/ditcraft/indexer/smartcontracts_v1/KNWVoting"
+	"github.com/ditcraft/indexer/smartcontracts_v1/ditCoordinator"
+	ethereum "github.com/ethereum/go-ethereum"
+	"github.com/ethereum/go-ethereum/accounts/abi"
+	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/ethereum/go-ethereum/ethclient"
+	"github.com/golang/glog"
+)
+
+var mutex = &sync.Mutex{}
+
+type logKNWTokenEvent struct {
+	Who   common.Address
+	Label string
+	Value *big.Int
+}
+
+type logERC20TransferEvent struct {
+	From  common.Address
+	To    common.Address
+	Value *big.Int
+}
+
+type logDitCoordinatorInit struct {
+	Repository [32]byte
+	Who        common.Address
+}
+
+type logDitCoordinatorPropose struct {
+	Repository  [32]byte
+	Proposal    *big.Int
+	Who         common.Address
+	Label       string
+	NumberOfKNW *big.Int
+}
+
+type logDitCoordinatorCommit struct {
+	Repository    [32]byte
+	Proposal      *big.Int
+	Who           common.Address
+	Label         string
+	Stake         *big.Int
+	NumberOfKNW   *big.Int
+	NumberOfVotes *big.Int
+}
+
+type logDitCoordinatorOpen struct {
+	Repository    [32]byte
+	Proposal      *big.Int
+	Who           common.Address
+	Label         string
+	Accept        bool
+	NumberOfVotes *big.Int
+}
+
+type logDitCoordinatorFinalizeVote struct {
+	Repository  [32]byte
+	Proposal    *big.Int
+	Who         common.Address
+	Label       string
+	VotedRight  bool
+	NumberOfKNW *big.Int
+}
+
+type logDitCoordinatorFinalizeProposal struct {
+	Repository [32]byte
+	Proposal   *big.Int
+	Label      string
+	Accepted   bool
+}
+
+var logTransferSig = []byte("Transfer(address,address,uint256)")
+var logTransferSigHash = crypto.Keccak256Hash(logTransferSig)
+var logDitCoordinatorInitSig = []byte("InitializeRepository(bytes32,address)")
+var logDitCoordinatorInitSigHash = crypto.Keccak256Hash(logDitCoordinatorInitSig)
+var logDitCoordinatorProposeSig = []byte("ProposeCommit(bytes32,uint256,address,string,uint256)")
+var logDitCoordinatorProposeSigHash = crypto.Keccak256Hash(logDitCoordinatorProposeSig)
+var logDitCoordinatorCommitSig = []byte("CommitVote(bytes32,uint256,address,string,uint256,uint256,uint256)")
+var logDitCoordinatorCommitSigHash = crypto.Keccak256Hash(logDitCoordinatorCommitSig)
+var logDitCoordinatorOpenSig = []byte("OpenVote(bytes32,uint256,address,string,bool,uint256)")
+var logDitCoordinatorOpenSigHash = crypto.Keccak256Hash(logDitCoordinatorOpenSig)
+var logDitCoordinatorFinalizeVoteSig = []byte("FinalizeVote(bytes32,uint256,address,string,bool,uint256)")
+var logDitCoordinatorFinalizeVoteSigHash = crypto.Keccak256Hash(logDitCoordinatorFinalizeVoteSig)
+var logDitCoordinatorFinalizeProposalSig = []byte("FinalizeProposal(bytes32,uint256,string,bool)")
+var logDitCoordinatorFinalizeProposalSigHash = crypto.Keccak256Hash(logDitCoordinatorFinalizeProposalSig)
+var logKNWTokenMint = []byte("Mint(address,string,uint256)")
+var logKNWTokenMintSig = crypto.Keccak256Hash(logKNWTokenMint)
+var logKNWTokenBurn = []byte("Burn(address,string,uint256)")
+var logKNWTokenBurnSig = crypto.Keccak256Hash(logKNWTokenBurn)
+
+var coordinatorAddress common.Address
+var knwTokenAddress common.Address
+
+var ditDemoCoordinatorABI abi.ABI
+var knwTokenABI abi.ABI
+
+// Init func
+func Init() {
+	coordinatorAddress = common.HexToAddress(os.Getenv("CONTRACT_DIT_COORDINATOR_LIVE"))
+	knwTokenAddress = common.HexToAddress(os.Getenv("CONTRACT_KNW_TOKEN_LIVE"))
+
+	var err error
+	ditDemoCoordinatorABI, err = abi.JSON(strings.NewReader(os.Getenv("DIT_LIVE_COORDINATOR_ABI")))
+	if err != nil {
+		glog.Fatal(err)
+	}
+
+	knwTokenABI, err = abi.JSON(strings.NewReader(os.Getenv("KNW_TOKEN_ABI")))
+	if err != nil {
+		glog.Fatal(err)
+	}
+}
+
+// GetCurrentBlock func
+func GetCurrentBlock() (int64, error) {
+	connection, err := getConnection()
+	if err != nil {
+		return 0, err
+	}
+
+	header, err := connection.HeaderByNumber(context.Background(), nil)
+	if err != nil {
+		return 0, err
+	}
+
+	return header.Number.Int64(), nil
+}
+
+// GetOldEvents func
+func GetOldEvents(_fromBlock int64, _toBlock int64) {
+	connection, err := getConnection()
+	if err != nil {
+		glog.Error(err)
+	}
+
+	offset := int64(100000)
+	offsetChanged := false
+	for _fromBlock < _toBlock {
+		toBlock := _toBlock
+		if _toBlock-_fromBlock > offset {
+			toBlock = _fromBlock + offset
+		}
+		glog.Info("Going from " + strconv.Itoa(int(_fromBlock)) + " to " + strconv.Itoa(int(toBlock)))
+		query := ethereum.FilterQuery{
+			FromBlock: big.NewInt(_fromBlock),
+			ToBlock:   big.NewInt(toBlock),
+			Addresses: []common.Address{
+				coordinatorAddress,
+				knwTokenAddress,
+			},
+		}
+
+		events, err := connection.FilterLogs(context.Background(), query)
+		if err != nil {
+			if strings.Contains(err.Error(), "unexpected EOF") {
+				glog.Info("Got 'unexpected EOF', reducing the offset to " + strconv.Itoa(int(offset)))
+				connection, err = getConnection()
+				if err != nil {
+					glog.Error(err)
+				}
+				offsetChanged = true
+				offset = offset * 75 / 100
+			} else {
+				glog.Fatal(err)
+			}
+		} else {
+			if !offsetChanged && offset < int64(100000) {
+				offset = offset * 100 / 80
+			}
+			offsetChanged = false
+			_fromBlock = toBlock + 1
+		}
+
+		for _, event := range events {
+			switch event.Topics[0].Hex() {
+			case logKNWTokenMintSig.Hex():
+				handleKNWTokenMint(&event, connection)
+			case logKNWTokenBurnSig.Hex():
+				handleKNWTokenBurn(&event, connection)
+			case logDitCoordinatorInitSigHash.Hex():
+				handleDitDemoCoordinatorInit(&event, connection)
+			case logDitCoordinatorProposeSigHash.Hex():
+				handleDitDemoCoordinatorPropose(&event, connection)
+			case logDitCoordinatorCommitSigHash.Hex():
+				handleDitDemoCoordinatorCommit(&event, connection)
+			case logDitCoordinatorOpenSigHash.Hex():
+				handleDitDemoCoordinatorOpen(&event, connection)
+			case logDitCoordinatorFinalizeVoteSigHash.Hex():
+				handleDitDemoCoordinatorFinalizeVote(&event, connection)
+			case logDitCoordinatorFinalizeProposalSigHash.Hex():
+				handleDitDemoCoordinatorFinalizeProposal(&event, connection)
+			}
+		}
+		time.Sleep(100 * time.Millisecond)
+		// os.Setenv("LAST_BLOCK", strconv.Itoa(int(_fromBlock-1)))
+	}
+}
+
+// WatchEvents func
+func WatchEvents() {
+	connection, err := getConnection()
+	if err != nil {
+		glog.Error(err)
+	}
+
+	query := ethereum.FilterQuery{
+		Addresses: []common.Address{
+			coordinatorAddress,
+			knwTokenAddress,
+		},
+	}
+
+	eventChan := make(chan types.Log)
+	sub, err := connection.SubscribeFilterLogs(context.Background(), query, eventChan)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	for {
+		select {
+		case err := <-sub.Err():
+			fmt.Println(err)
+		case event := <-eventChan:
+			switch event.Topics[0].Hex() {
+			case logKNWTokenMintSig.Hex():
+				handleKNWTokenMint(&event, connection)
+			case logKNWTokenBurnSig.Hex():
+				handleKNWTokenBurn(&event, connection)
+			case logDitCoordinatorInitSigHash.Hex():
+				handleDitDemoCoordinatorInit(&event, connection)
+			case logDitCoordinatorProposeSigHash.Hex():
+				handleDitDemoCoordinatorInit(&event, connection)
+			case logDitCoordinatorCommitSigHash.Hex():
+				handleDitDemoCoordinatorCommit(&event, connection)
+			case logDitCoordinatorOpenSigHash.Hex():
+				handleDitDemoCoordinatorOpen(&event, connection)
+			case logDitCoordinatorFinalizeVoteSigHash.Hex():
+				handleDitDemoCoordinatorFinalizeVote(&event, connection)
+			case logDitCoordinatorFinalizeProposalSigHash.Hex():
+				handleDitDemoCoordinatorFinalizeProposal(&event, connection)
+			}
+		}
+	}
+}
+
+func handleKNWTokenMint(event *types.Log, connection *ethclient.Client) {
+	if strings.Contains(os.Getenv("AUTOVALIDATORS"), common.HexToAddress(event.Topics[1].Hex()).Hex()) {
+		return
+	}
+	glog.Info("Token Mint Event")
+	var tokenEvent logKNWTokenEvent
+	err := knwTokenABI.Unpack(&tokenEvent, "Mint", event.Data)
+	if err != nil {
+		glog.Error(err)
+		return
+	}
+	tokenEvent.Who = common.HexToAddress(event.Topics[1].Hex())
+	userBytes, err := database.Get("users", []string{"dit_address"}, []string{"=="}, []interface{}{tokenEvent.Who.Hex()})
+	if err != nil {
+		glog.Error(err)
+		return
+	}
+
+	var user database.User
+	if len(userBytes) == 0 {
+		user.DitAddress = tokenEvent.Who.Hex()
+		twitterID, err := database.GetIDFromAddress(user.DitAddress)
+		if err != nil {
+			glog.Error(err)
+		}
+		user.TwitterID = twitterID
+	} else if len(userBytes) == 1 {
+		bsonErr := bson.Unmarshal(userBytes[0], &user)
+		if bsonErr != nil {
+			glog.Error(bsonErr)
+			return
+		}
+	}
+
+	found := false
+	for i, label := range user.KNWTokensLive {
+		if label.Label == tokenEvent.Label {
+			found = true
+			amount, ok := new(big.Int).SetString(label.RawBalance, 10)
+			if !ok {
+				glog.Error("Conversion not okay")
+				return
+			}
+			newValue := new(big.Int).Add(amount, tokenEvent.Value)
+			user.KNWTokensLive[i].RawBalance = newValue.String()
+			floatBalance, _ := (new(big.Float).Quo((new(big.Float).SetInt(newValue)), big.NewFloat(1000000000000000000))).Float64()
+			user.KNWTokensLive[i].Balance = floatBalance
+		}
+	}
+	if !found {
+		floatBalance, _ := (new(big.Float).Quo((new(big.Float).SetInt(tokenEvent.Value)), big.NewFloat(1000000000000000000))).Float64()
+		newLabel := database.KNWLabels{Label: tokenEvent.Label, RawBalance: tokenEvent.Value.String(), Balance: floatBalance}
+		user.KNWTokensLive = append(user.KNWTokensLive, newLabel)
+	}
+	err = database.Replace("users", "dit_address", tokenEvent.Who.Hex(), user)
+	if err != nil {
+		if strings.Contains(err.Error(), "not found") {
+			err = database.Insert("users", user)
+			if err != nil {
+				glog.Error(err)
+			}
+		}
+		if err != nil {
+			glog.Error(err)
+		}
+	}
+}
+
+func handleKNWTokenBurn(event *types.Log, connection *ethclient.Client) {
+	if strings.Contains(os.Getenv("AUTOVALIDATORS"), common.HexToAddress(event.Topics[1].Hex()).Hex()) {
+		return
+	}
+
+	glog.Info("Token Burn Event")
+	var tokenEvent logKNWTokenEvent
+	err := knwTokenABI.Unpack(&tokenEvent, "Burn", event.Data)
+	if err != nil {
+		glog.Error(err)
+		return
+	}
+	tokenEvent.Who = common.HexToAddress(event.Topics[1].Hex())
+	userBytes, err := database.Get("users", []string{"dit_address"}, []string{"=="}, []interface{}{tokenEvent.Who.Hex()})
+	if err != nil {
+		glog.Error(err)
+		return
+	}
+
+	var user database.User
+	if len(userBytes) == 0 {
+		user.DitAddress = tokenEvent.Who.Hex()
+		twitterID, err := database.GetIDFromAddress(user.DitAddress)
+		if err != nil {
+			glog.Error(err)
+		}
+		user.TwitterID = twitterID
+	} else if len(userBytes) == 1 {
+		bsonErr := bson.Unmarshal(userBytes[0], &user)
+		if bsonErr != nil {
+			glog.Error(bsonErr)
+			return
+		}
+	}
+
+	found := false
+	for i, label := range user.KNWTokensLive {
+		if label.Label == tokenEvent.Label {
+			found = true
+			amount, ok := new(big.Int).SetString(label.RawBalance, 10)
+			if !ok {
+				glog.Error("Conversion not okay")
+				return
+			}
+			newValue := new(big.Int).Add(amount, tokenEvent.Value)
+			user.KNWTokensLive[i].RawBalance = newValue.String()
+			floatBalance, _ := (new(big.Float).Quo((new(big.Float).SetInt(newValue)), big.NewFloat(1000000000000000000))).Float64()
+			user.KNWTokensLive[i].Balance = floatBalance
+		}
+	}
+	if !found {
+		floatBalance, _ := (new(big.Float).Quo((new(big.Float).SetInt(tokenEvent.Value)), big.NewFloat(1000000000000000000))).Float64()
+		newLabel := database.KNWLabels{Label: tokenEvent.Label, RawBalance: tokenEvent.Value.String(), Balance: floatBalance}
+		user.KNWTokensLive = append(user.KNWTokensLive, newLabel)
+	}
+
+	err = database.Replace("users", "dit_address", tokenEvent.Who.Hex(), user)
+	if err != nil {
+		if strings.Contains(err.Error(), "not found") {
+			err = database.Insert("users", user)
+			if err != nil {
+				glog.Error(err)
+			}
+		}
+		if err != nil {
+			glog.Error(err)
+		}
+	}
+}
+
+func handleDitDemoCoordinatorInit(event *types.Log, connection *ethclient.Client) {
+	glog.Info("Init event")
+	var initEvent logDitCoordinatorInit
+	initEvent.Repository = event.Topics[1]
+	initEvent.Who = common.HexToAddress(event.Topics[2].Hex())
+
+	connection, err := getConnection()
+	if err != nil {
+		glog.Error(err)
+		return
+	}
+
+	ditCoordinatorInstance, err := getDitCoordinatorInstance(connection)
+	if err != nil {
+		glog.Error(err)
+		return
+	}
+
+	repository, err := ditCoordinatorInstance.Repositories(nil, initEvent.Repository)
+	if err != nil {
+		glog.Error(err)
+		return
+	}
+
+	var newRepository database.Repository
+	newRepository.Hash = event.Topics[1].Hex()
+	nameParts := strings.SplitN(repository.Name, "/", 2)
+	newRepository.Name = nameParts[1]
+	provider := strings.ToLower(nameParts[0])
+	if strings.Contains(provider, "github") {
+		newRepository.Provider = "GitHub"
+	} else if strings.Contains(provider, "bitbucket") {
+		newRepository.Provider = "Bitbucket"
+	} else if strings.Contains(provider, "gitlab") {
+		newRepository.Provider = "GitLab"
+	} else {
+		newRepository.Provider = "Unknown"
+	}
+	newRepository.Majority = int(repository.VotingMajority.Int64())
+	newRepository.URL = "https://" + repository.Name
+
+	block, err := connection.BlockByNumber(context.Background(), big.NewInt(int64(event.BlockNumber)))
+	if err != nil {
+		glog.Error(err)
+		return
+	}
+
+	newRepository.CreationDate = time.Unix(int64(block.Time()), 0)
+	newRepository.LastActivityDate = newRepository.CreationDate
+
+	for i := 0; i < 3; i++ {
+		label, err := ditCoordinatorInstance.GetKnowledgeLabels(nil, initEvent.Repository, big.NewInt(int64(i)))
+		if err != nil {
+			glog.Error(err)
+			return
+		}
+		if len(label) > 0 {
+			newRepository.KnowledgeLabels = append(newRepository.KnowledgeLabels, label)
+		}
+	}
+
+	err = database.Insert("repositories_live", newRepository)
+	if err != nil {
+		glog.Error(err)
+	}
+}
+
+func handleDitDemoCoordinatorPropose(event *types.Log, connection *ethclient.Client) {
+	glog.Info("Propose event")
+	var proposeEvent logDitCoordinatorPropose
+	err := ditDemoCoordinatorABI.Unpack(&proposeEvent, "ProposeCommit", event.Data)
+	if err != nil {
+		glog.Error(err)
+	}
+	proposeEvent.Repository = event.Topics[1]
+	proposeEvent.Proposal = event.Topics[2].Big()
+	proposeEvent.Who = common.HexToAddress(event.Topics[3].Hex())
+
+	ditCoordinatorInstance, err := getDitCoordinatorInstance(connection)
+	if err != nil {
+		glog.Error(err)
+		return
+	}
+
+	knwVotingInstance, err := getKNWVotingInstance(connection)
+	if err != nil {
+		glog.Error(err)
+		return
+	}
+
+	block, err := connection.BlockByNumber(context.Background(), big.NewInt(int64(event.BlockNumber)))
+	if err != nil {
+		glog.Error(err)
+		return
+	}
+
+	repositoryBytes, err := database.Get("repositories_live", []string{"hash"}, []string{"=="}, []interface{}{event.Topics[1].Hex()})
+	if err != nil {
+		glog.Error(err)
+		return
+	}
+
+	if len(repositoryBytes) != 1 {
+		glog.Errorf("Expected one repository to be found but found %d\n", len(repositoryBytes))
+		return
+	}
+
+	var repository database.Repository
+	bsonErr := bson.Unmarshal(repositoryBytes[0], &repository)
+	if bsonErr != nil {
+		glog.Error(bsonErr)
+		return
+	}
+
+	proposal, err := ditCoordinatorInstance.ProposalsOfRepository(nil, event.Topics[1], proposeEvent.Proposal)
+	if err != nil {
+		glog.Error(err)
+		return
+	}
+
+	vote, err := knwVotingInstance.Votes(nil, proposal.KNWVoteID)
+	if err != nil {
+		glog.Error(err)
+		return
+	}
+
+	var newVote database.ProposalDetailsRepository
+	newVote.KNWVoteID = int(proposal.KNWVoteID.Int64())
+	newVote.VoteDate = time.Unix(int64(block.Time()), 0)
+	repository.Proposals = append(repository.Proposals, newVote)
+
+	found := false
+	for i, contributor := range repository.Contributors {
+		if contributor.Address == proposeEvent.Who.Hex() {
+			repository.Contributors[i].AmountOfProposals++
+			repository.Contributors[i].LastActivityDate = time.Unix(int64(block.Time()), 0)
+			found = true
+			break
+		}
+	}
+	if !found {
+		newContributor := database.ProposalDetailsContributor{
+			Address:             proposeEvent.Who.Hex(),
+			LastActivityDate:    time.Unix(int64(block.Time()), 0),
+			EarnedKNW:           0,
+			AmountOfProposals:   1,
+			AmountOfValidations: 0,
+		}
+		repository.Contributors = append(repository.Contributors, newContributor)
+	}
+	err = database.Replace("repositories_live", "hash", event.Topics[1].Hex(), repository)
+	if err != nil {
+		glog.Error(err)
+		return
+	}
+
+	var newProposal database.Proposal
+	newProposal.ProposalID = int(proposeEvent.Proposal.Int64())
+	newProposal.KNWVoteID = int(proposal.KNWVoteID.Int64())
+	newProposal.KNWLabel = proposeEvent.Label
+	newProposal.Repository = event.Topics[1].Hex()
+	newProposal.Proposer = proposeEvent.Who.Hex()
+	newProposal.Topic = ""
+	newProposal.Identifier = ""
+	newProposal.CreationDate = time.Unix(int64(block.Time()), 0)
+	newProposal.CommitPhaseEnd = time.Unix(vote.CommitEndDate.Int64(), 0)
+	newProposal.RevealPhaseEnd = time.Unix(vote.OpenEndDate.Int64(), 0)
+	newProposal.Finalized = false
+	newProposal.Accepted = false
+	newProposal.Votes = database.ProposalVotes{}
+	newProposal.Participants = []database.ProposalParticipants{}
+	floatIndividualStake, _ := (new(big.Float).Quo((new(big.Float).SetInt(proposal.IndividualStake)), big.NewFloat(1000000000000000000))).Float64()
+	newProposal.StakePerParticipant = floatIndividualStake
+	newProposal.TotalStake = floatIndividualStake
+	newProposal.TotalMintedKNW = 0
+
+	var newParticipant database.ProposalParticipants
+	newParticipant.Address = proposeEvent.Who.Hex()
+	newParticipant.Opened = true
+	newParticipant.Finalized = false
+	newParticipant.KNWDifference = 0.0
+	floatUsedKNW, _ := (new(big.Float).Quo((new(big.Float).SetInt(proposeEvent.NumberOfKNW)), big.NewFloat(1000000000000000000))).Float64()
+	newParticipant.UsedKNW = floatUsedKNW
+	newParticipant.VotedRight = false
+	newParticipant.Votes = 0
+
+	newProposal.Participants = append(newProposal.Participants, newParticipant)
+
+	err = database.Insert("proposals_live", &newProposal)
+	if err != nil {
+		glog.Error(err)
+	}
+
+	userBytes, err := database.Get("users", []string{"dit_address"}, []string{"=="}, []interface{}{proposeEvent.Who.Hex()})
+	if err != nil {
+		glog.Error(err)
+	}
+
+	var user database.User
+	if len(userBytes) == 0 {
+		user.DitAddress = proposeEvent.Who.Hex()
+		twitterID, err := database.GetIDFromAddress(user.DitAddress)
+		if err != nil {
+			glog.Error(err)
+		}
+		user.TwitterID = twitterID
+	} else if len(userBytes) == 1 {
+		bsonErr := bson.Unmarshal(userBytes[0], &user)
+		if bsonErr != nil {
+			glog.Error(bsonErr)
+			return
+		}
+	}
+
+	currentDaiBalance, err := connection.BalanceAt(context.Background(), proposeEvent.Who, nil)
+	if err != nil {
+		glog.Error(err)
+	} else {
+		floatIndividualDaiBalance, _ := (new(big.Float).Quo((new(big.Float).SetInt(currentDaiBalance)), big.NewFloat(1000000000000000000))).Float64()
+		user.XDAIBalance = floatIndividualDaiBalance
+	}
+
+	var newUserProposal database.ProposalDetailsUser
+	newUserProposal.Finalized = false
+	newUserProposal.IsProposer = true
+	newUserProposal.KNWDifference = 0.0
+	newUserProposal.KNWVoteID = newProposal.KNWVoteID
+	newUserProposal.Opened = true
+	newUserProposal.UsedKNW = floatUsedKNW
+	newUserProposal.Stake = floatIndividualStake
+	newUserProposal.VoteDate = newProposal.CreationDate
+	newUserProposal.VotedRight = false
+
+	user.ProposalsLive = append(user.ProposalsLive, newUserProposal)
+
+	index := -1
+	for i, singleRepository := range user.RepositoriesLive {
+		if singleRepository.Hash == repository.Hash {
+			index = i
+			break
+		}
+	}
+	if index == -1 {
+		var newRepository database.RepositoryDetailsUser
+		newRepository.Hash = repository.Hash
+		newRepository.Name = repository.Name
+		newRepository.URL = repository.URL
+		newRepository.Provider = repository.Provider
+		user.RepositoriesLive = append(user.RepositoriesLive, newRepository)
+		index = len(user.RepositoriesLive) - 1
+	}
+
+	user.RepositoriesLive[index].LastActivityDate = time.Unix(int64(block.Time()), 0)
+	user.RepositoriesLive[index].AmountOfProposals++
+
+	err = database.Replace("users", "dit_address", proposeEvent.Who.Hex(), user)
+	if err != nil {
+		if strings.Contains(err.Error(), "not found") {
+			err = database.Insert("users", user)
+			if err != nil {
+				glog.Error(err)
+			}
+		}
+		if err != nil {
+			glog.Error(err)
+		}
+	}
+}
+
+func handleDitDemoCoordinatorCommit(event *types.Log, connection *ethclient.Client) {
+	glog.Info("Commit vote event")
+	var commitEvent logDitCoordinatorCommit
+	err := ditDemoCoordinatorABI.Unpack(&commitEvent, "CommitVote", event.Data)
+	if err != nil {
+		glog.Error(err)
+	}
+	commitEvent.Repository = event.Topics[1]
+	commitEvent.Proposal = event.Topics[2].Big()
+	commitEvent.Who = common.HexToAddress(event.Topics[3].Hex())
+
+	block, err := connection.BlockByNumber(context.Background(), big.NewInt(int64(event.BlockNumber)))
+	if err != nil {
+		glog.Error(err)
+		return
+	}
+
+	repositoryBytes, err := database.Get("repositories_live", []string{"hash"}, []string{"=="}, []interface{}{event.Topics[1].Hex()})
+	if err != nil {
+		glog.Error(err)
+		return
+	}
+
+	if len(repositoryBytes) != 1 {
+		glog.Errorf("Expected one repository to be found but found %d\n", len(repositoryBytes))
+		return
+	}
+
+	var repository database.Repository
+	bsonErr := bson.Unmarshal(repositoryBytes[0], &repository)
+	if bsonErr != nil {
+		glog.Error(bsonErr)
+		return
+	}
+
+	repository.LastActivityDate = time.Unix(int64(block.Time()), 0)
+
+	found := false
+	for i, contributor := range repository.Contributors {
+		if contributor.Address == commitEvent.Who.Hex() {
+			repository.Contributors[i].AmountOfValidations++
+			repository.Contributors[i].LastActivityDate = time.Unix(int64(block.Time()), 0)
+			found = true
+			break
+		}
+	}
+	if !found {
+		newContributor := database.ProposalDetailsContributor{
+			Address:             commitEvent.Who.Hex(),
+			LastActivityDate:    time.Unix(int64(block.Time()), 0),
+			EarnedKNW:           0,
+			AmountOfProposals:   0,
+			AmountOfValidations: 1,
+		}
+		repository.Contributors = append(repository.Contributors, newContributor)
+	}
+	err = database.Replace("repositories_live", "hash", event.Topics[1].Hex(), repository)
+	if err != nil {
+		glog.Error(err)
+		return
+	}
+
+	proposalBytes, err := database.Get("proposals_live", []string{"repository", "id"}, []string{"=="}, []interface{}{event.Topics[1].Hex(), int(commitEvent.Proposal.Int64())})
+	if err != nil {
+		glog.Error(err)
+		return
+	}
+
+	if len(proposalBytes) != 1 {
+		glog.Errorf("Expected one proposal to be found but found %d\n", len(proposalBytes))
+		return
+	}
+
+	var proposal database.Proposal
+	bsonErr = bson.Unmarshal(proposalBytes[0], &proposal)
+	if bsonErr != nil {
+		glog.Error(bsonErr)
+		return
+	}
+
+	proposal.Votes.ParticipantsUnrevealed++
+	floatVotes, _ := (new(big.Float).Quo((new(big.Float).SetInt(commitEvent.NumberOfVotes)), big.NewFloat(1000000000000000000))).Float64()
+	proposal.Votes.VotesUnrevealed += floatVotes
+	floatStake, _ := (new(big.Float).Quo((new(big.Float).SetInt(commitEvent.Stake)), big.NewFloat(1000000000000000000))).Float64()
+	proposal.TotalStake += floatStake
+
+	var newParticipant database.ProposalParticipants
+	newParticipant.Address = commitEvent.Who.Hex()
+	newParticipant.Opened = false
+	newParticipant.Finalized = false
+	newParticipant.KNWDifference = 0.0
+	floatUsedKNW, _ := (new(big.Float).Quo((new(big.Float).SetInt(commitEvent.NumberOfKNW)), big.NewFloat(1000000000000000000))).Float64()
+	newParticipant.UsedKNW = floatUsedKNW
+	newParticipant.VotedRight = false
+	newParticipant.Votes = floatVotes
+
+	proposal.Participants = append(proposal.Participants, newParticipant)
+
+	err = database.Replace("proposals_live", "knw_vote_id", proposal.KNWVoteID, proposal)
+	if err != nil {
+		glog.Error(err)
+		return
+	}
+
+	userBytes, err := database.Get("users", []string{"dit_address"}, []string{"=="}, []interface{}{commitEvent.Who.Hex()})
+	if err != nil {
+		glog.Error(err)
+	}
+
+	if strings.Contains(os.Getenv("AUTOVALIDATORS"), commitEvent.Who.Hex()) {
+		return
+	}
+
+	var user database.User
+	if len(userBytes) == 0 {
+		user.DitAddress = commitEvent.Who.Hex()
+		twitterID, err := database.GetIDFromAddress(user.DitAddress)
+		if err != nil {
+			glog.Error(err)
+		}
+		user.TwitterID = twitterID
+	} else if len(userBytes) == 1 {
+		bsonErr := bson.Unmarshal(userBytes[0], &user)
+		if bsonErr != nil {
+			glog.Error(bsonErr)
+			return
+		}
+	}
+
+	currentDaiBalance, err := connection.BalanceAt(context.Background(), commitEvent.Who, nil)
+	if err != nil {
+		glog.Error(err)
+	} else {
+		floatIndividualDaiBalance, _ := (new(big.Float).Quo((new(big.Float).SetInt(currentDaiBalance)), big.NewFloat(1000000000000000000))).Float64()
+		user.XDAIBalance = floatIndividualDaiBalance
+	}
+
+	var newUserProposal database.ProposalDetailsUser
+	newUserProposal.Finalized = false
+	newUserProposal.IsProposer = false
+	newUserProposal.KNWDifference = 0.0
+	newUserProposal.KNWVoteID = proposal.KNWVoteID
+	newUserProposal.Opened = false
+	newUserProposal.UsedKNW = floatUsedKNW
+	newUserProposal.Stake = floatStake
+	newUserProposal.VoteDate = time.Unix(int64(block.Time()), 0)
+	newUserProposal.VotedRight = false
+
+	user.ProposalsLive = append(user.ProposalsLive, newUserProposal)
+
+	index := -1
+	for i, singleRepository := range user.RepositoriesLive {
+		if singleRepository.Hash == repository.Hash {
+			index = i
+			break
+		}
+	}
+	if index == -1 {
+		var newRepository database.RepositoryDetailsUser
+		newRepository.Hash = repository.Hash
+		newRepository.Name = repository.Name
+		newRepository.URL = repository.URL
+		newRepository.Provider = repository.Provider
+		user.RepositoriesLive = append(user.RepositoriesLive, newRepository)
+		index = len(user.RepositoriesLive) - 1
+	}
+
+	user.RepositoriesLive[index].LastActivityDate = time.Unix(int64(block.Time()), 0)
+	user.RepositoriesLive[index].AmountOfValidations++
+
+	err = database.Replace("users", "dit_address", commitEvent.Who.Hex(), user)
+	if err != nil {
+		if strings.Contains(err.Error(), "not found") {
+			err = database.Insert("users", user)
+			if err != nil {
+				glog.Error(err)
+			}
+		}
+		if err != nil {
+			glog.Error(err)
+		}
+	}
+}
+
+func handleDitDemoCoordinatorOpen(event *types.Log, connection *ethclient.Client) {
+	glog.Info("Open Vote event")
+	var openEvent logDitCoordinatorOpen
+	err := ditDemoCoordinatorABI.Unpack(&openEvent, "OpenVote", event.Data)
+	if err != nil {
+		glog.Error(err)
+	}
+	openEvent.Repository = event.Topics[1]
+	openEvent.Proposal = event.Topics[2].Big()
+	openEvent.Who = common.HexToAddress(event.Topics[3].Hex())
+
+	block, err := connection.BlockByNumber(context.Background(), big.NewInt(int64(event.BlockNumber)))
+	if err != nil {
+		glog.Error(err)
+		return
+	}
+
+	repositoryBytes, err := database.Get("repositories_live", []string{"hash"}, []string{"=="}, []interface{}{event.Topics[1].Hex()})
+	if err != nil {
+		glog.Error(err)
+		return
+	}
+
+	if len(repositoryBytes) != 1 {
+		glog.Errorf("Expected one repository to be found but found %d\n", len(repositoryBytes))
+		return
+	}
+
+	var repository database.Repository
+	bsonErr := bson.Unmarshal(repositoryBytes[0], &repository)
+	if bsonErr != nil {
+		glog.Error(bsonErr)
+		return
+	}
+
+	repository.LastActivityDate = time.Unix(int64(block.Time()), 0)
+
+	for i, contributor := range repository.Contributors {
+		if contributor.Address == openEvent.Who.Hex() {
+			repository.Contributors[i].LastActivityDate = time.Unix(int64(block.Time()), 0)
+			break
+		}
+	}
+
+	err = database.Replace("repositories_live", "hash", event.Topics[1].Hex(), repository)
+	if err != nil {
+		glog.Error(err)
+		return
+	}
+
+	proposalBytes, err := database.Get("proposals_live", []string{"repository", "id"}, []string{"=="}, []interface{}{event.Topics[1].Hex(), int(openEvent.Proposal.Int64())})
+	if err != nil {
+		glog.Error(err)
+		return
+	}
+
+	if len(proposalBytes) != 1 {
+		glog.Errorf("Expected one proposal to be found but found %d\n", len(proposalBytes))
+		return
+	}
+
+	var proposal database.Proposal
+	bsonErr = bson.Unmarshal(proposalBytes[0], &proposal)
+	if bsonErr != nil {
+		glog.Error(bsonErr)
+		return
+	}
+
+	proposal.Votes.ParticipantsUnrevealed--
+
+	for i, participant := range proposal.Participants {
+		if participant.Address == openEvent.Who.Hex() {
+			proposal.Votes.VotesUnrevealed -= participant.Votes
+			if openEvent.Accept {
+				proposal.Votes.ParticipantsFor++
+				proposal.Votes.VotesFor += participant.Votes
+			} else {
+				proposal.Votes.ParticipantsAgainst++
+				proposal.Votes.VotesAgainst += participant.Votes
+			}
+			proposal.Participants[i].Opened = true
+			break
+		}
+	}
+	if proposal.Votes.ParticipantsUnrevealed == 0 && proposal.Votes.VotesUnrevealed < 0.00001 {
+		proposal.Votes.VotesUnrevealed = 0
+	}
+
+	err = database.Replace("proposals_live", "knw_vote_id", proposal.KNWVoteID, proposal)
+	if err != nil {
+		glog.Error(err)
+		return
+	}
+
+	if strings.Contains(os.Getenv("AUTOVALIDATORS"), openEvent.Who.Hex()) {
+		return
+	}
+
+	userBytes, err := database.Get("users", []string{"dit_address"}, []string{"=="}, []interface{}{openEvent.Who.Hex()})
+	if err != nil {
+		glog.Error(err)
+	}
+
+	if len(userBytes) != 1 {
+		glog.Error(fmt.Errorf("Expected one user to be found but found %d", len(userBytes)))
+		return
+	}
+
+	var user database.User
+	bsonErr = bson.Unmarshal(userBytes[0], &user)
+	if bsonErr != nil {
+		glog.Error(bsonErr)
+		return
+	}
+
+	currentDaiBalance, err := connection.BalanceAt(context.Background(), openEvent.Who, nil)
+	if err != nil {
+		glog.Error(err)
+	} else {
+		floatIndividualDaiBalance, _ := (new(big.Float).Quo((new(big.Float).SetInt(currentDaiBalance)), big.NewFloat(1000000000000000000))).Float64()
+		user.XDAIBalance = floatIndividualDaiBalance
+	}
+
+	for i, singleProposal := range user.ProposalsLive {
+		if singleProposal.KNWVoteID == proposal.KNWVoteID {
+			user.ProposalsLive[i].Opened = true
+			break
+		}
+	}
+
+	for i, singleRepository := range user.RepositoriesLive {
+		if singleRepository.Hash == repository.Hash {
+			user.RepositoriesLive[i].LastActivityDate = time.Unix(int64(block.Time()), 0)
+			break
+		}
+	}
+
+	err = database.Replace("users", "dit_address", openEvent.Who.Hex(), user)
+	if err != nil {
+		glog.Error(err)
+	}
+}
+
+func handleDitDemoCoordinatorFinalizeVote(event *types.Log, connection *ethclient.Client) {
+	glog.Info("Finalize Vote event")
+	var finalizeVoteEvent logDitCoordinatorFinalizeVote
+	err := ditDemoCoordinatorABI.Unpack(&finalizeVoteEvent, "FinalizeVote", event.Data)
+	if err != nil {
+		glog.Error(err)
+		return
+	}
+	finalizeVoteEvent.Repository = event.Topics[1]
+	finalizeVoteEvent.Proposal = event.Topics[2].Big()
+	finalizeVoteEvent.Who = common.HexToAddress(event.Topics[3].Hex())
+	floatKNWDifference, _ := (new(big.Float).Quo((new(big.Float).SetInt(finalizeVoteEvent.NumberOfKNW)), big.NewFloat(1000000000000000000))).Float64()
+
+	block, err := connection.BlockByNumber(context.Background(), big.NewInt(int64(event.BlockNumber)))
+	if err != nil {
+		glog.Error(err)
+		return
+	}
+
+	repositoryBytes, err := database.Get("repositories_live", []string{"hash"}, []string{"=="}, []interface{}{event.Topics[1].Hex()})
+	if err != nil {
+		glog.Error(err)
+		return
+	}
+
+	if len(repositoryBytes) != 1 {
+		glog.Errorf("Expected one repository to be found but found %d\n", len(repositoryBytes))
+		return
+	}
+
+	var repository database.Repository
+	bsonErr := bson.Unmarshal(repositoryBytes[0], &repository)
+	if bsonErr != nil {
+		glog.Error(bsonErr)
+		return
+	}
+
+	proposalBytes, err := database.Get("proposals_live", []string{"repository", "id"}, []string{"=="}, []interface{}{event.Topics[1].Hex(), int(finalizeVoteEvent.Proposal.Int64())})
+	if err != nil {
+		glog.Error(err)
+		return
+	}
+
+	if len(proposalBytes) != 1 {
+		glog.Errorf("Expected one proposal to be found but found %d\n", len(proposalBytes))
+		return
+	}
+
+	var proposal database.Proposal
+	bsonErr = bson.Unmarshal(proposalBytes[0], &proposal)
+	if bsonErr != nil {
+		glog.Error(bsonErr)
+		return
+	}
+
+	votedRight := false
+	for i, participant := range proposal.Participants {
+		if participant.Address == finalizeVoteEvent.Who.Hex() {
+			if proposal.Proposer == finalizeVoteEvent.Who.Hex() {
+				votedRight = proposal.Accepted
+				proposal.Participants[i].VotedRight = votedRight
+			} else {
+				votedRight = finalizeVoteEvent.VotedRight
+				proposal.Participants[i].VotedRight = votedRight
+			}
+			proposal.Participants[i].Finalized = true
+
+			proposal.Participants[i].KNWDifference = floatKNWDifference
+			if votedRight {
+				proposal.TotalMintedKNW += floatKNWDifference
+			}
+			break
+		}
+	}
+
+	repository.LastActivityDate = time.Unix(int64(block.Time()), 0)
+
+	var currentEarnedKNW float64
+	for i, contributor := range repository.Contributors {
+		if contributor.Address == finalizeVoteEvent.Who.Hex() {
+			repository.Contributors[i].LastActivityDate = time.Unix(int64(block.Time()), 0)
+			if votedRight {
+				repository.Contributors[i].EarnedKNW += floatKNWDifference
+			} else {
+				repository.Contributors[i].EarnedKNW -= floatKNWDifference
+			}
+			currentEarnedKNW = repository.Contributors[i].EarnedKNW
+			break
+		}
+	}
+
+	err = database.Replace("repositories_live", "hash", event.Topics[1].Hex(), repository)
+	if err != nil {
+		glog.Error(err)
+		return
+	}
+
+	err = database.Replace("proposals_live", "knw_vote_id", proposal.KNWVoteID, proposal)
+	if err != nil {
+		glog.Error(err)
+		return
+	}
+
+	if strings.Contains(os.Getenv("AUTOVALIDATORS"), finalizeVoteEvent.Who.Hex()) {
+		return
+	}
+
+	userBytes, err := database.Get("users", []string{"dit_address"}, []string{"=="}, []interface{}{finalizeVoteEvent.Who.Hex()})
+	if err != nil {
+		glog.Error(err)
+	}
+
+	if len(userBytes) != 1 {
+		glog.Error(fmt.Errorf("Expected one user to be found but found %d", len(userBytes)))
+		return
+	}
+
+	var user database.User
+	bsonErr = bson.Unmarshal(userBytes[0], &user)
+	if bsonErr != nil {
+		glog.Error(bsonErr)
+		return
+	}
+
+	currentDaiBalance, err := connection.BalanceAt(context.Background(), finalizeVoteEvent.Who, nil)
+	if err != nil {
+		glog.Error(err)
+	} else {
+		floatIndividualDaiBalance, _ := (new(big.Float).Quo((new(big.Float).SetInt(currentDaiBalance)), big.NewFloat(1000000000000000000))).Float64()
+		user.XDAIBalance = floatIndividualDaiBalance
+	}
+
+	for i, singleProposal := range user.ProposalsLive {
+		if singleProposal.KNWVoteID == proposal.KNWVoteID {
+			user.ProposalsLive[i].Finalized = true
+			user.ProposalsLive[i].VotedRight = votedRight
+			user.ProposalsLive[i].KNWDifference = floatKNWDifference
+			break
+		}
+	}
+
+	for i, singleRepository := range user.RepositoriesLive {
+		if singleRepository.Hash == repository.Hash {
+			user.RepositoriesLive[i].LastActivityDate = time.Unix(int64(block.Time()), 0)
+			user.RepositoriesLive[i].EarnedKNW = currentEarnedKNW
+			break
+		}
+	}
+
+	err = database.Replace("users", "dit_address", finalizeVoteEvent.Who.Hex(), user)
+	if err != nil {
+		glog.Error(err)
+	}
+}
+
+func handleDitDemoCoordinatorFinalizeProposal(event *types.Log, connection *ethclient.Client) {
+	glog.Info("Finalize Proposal event")
+	var finalizeProposalEvent logDitCoordinatorFinalizeProposal
+	err := ditDemoCoordinatorABI.Unpack(&finalizeProposalEvent, "FinalizeProposal", event.Data)
+	if err != nil {
+		glog.Error(err)
+		return
+	}
+	finalizeProposalEvent.Repository = event.Topics[1]
+	finalizeProposalEvent.Proposal = event.Topics[2].Big()
+
+	block, err := connection.BlockByNumber(context.Background(), big.NewInt(int64(event.BlockNumber)))
+	if err != nil {
+		glog.Error(err)
+	}
+
+	repositoryBytes, err := database.Get("repositories_live", []string{"hash"}, []string{"=="}, []interface{}{event.Topics[1].Hex()})
+	if err != nil {
+		glog.Error(err)
+		return
+	}
+
+	if len(repositoryBytes) != 1 {
+		glog.Errorf("Expected one repository to be found but found %d\n", len(repositoryBytes))
+		return
+	}
+
+	var repository database.Repository
+	bsonErr := bson.Unmarshal(repositoryBytes[0], &repository)
+	if bsonErr != nil {
+		glog.Error(bsonErr)
+		return
+	}
+
+	proposalBytes, err := database.Get("proposals_live", []string{"repository", "id"}, []string{"=="}, []interface{}{event.Topics[1].Hex(), int(finalizeProposalEvent.Proposal.Int64())})
+	if err != nil {
+		glog.Error(err)
+		return
+	}
+
+	if len(proposalBytes) != 1 {
+		glog.Errorf("Expected one proposal to be found but found %d\n", len(proposalBytes))
+		return
+	}
+
+	var proposal database.Proposal
+	bsonErr = bson.Unmarshal(proposalBytes[0], &proposal)
+	if bsonErr != nil {
+		glog.Error(bsonErr)
+		return
+	}
+
+	repository.LastActivityDate = time.Unix(int64(block.Time()), 0)
+
+	for i, proposal := range repository.Proposals {
+		if proposal.KNWVoteID == proposal.KNWVoteID {
+			repository.Proposals[i].VoteDate = time.Unix(int64(block.Time()), 0)
+			break
+		}
+	}
+
+	err = database.Replace("repositories_live", "hash", event.Topics[1].Hex(), repository)
+	if err != nil {
+		glog.Error(err)
+		return
+	}
+
+	proposal.Finalized = true
+	proposal.Accepted = finalizeProposalEvent.Accepted
+
+	err = database.Replace("proposals_live", "knw_vote_id", proposal.KNWVoteID, proposal)
+	if err != nil {
+		glog.Error(err)
+		return
+	}
+}
+
+func getDitCoordinatorInstance(_connection *ethclient.Client) (*ditCoordinator.DitCoordinator, error) {
+	// Convertig the hex-string-formatted address into an address object
+	ditCoordinatorAddressObject := common.HexToAddress(os.Getenv("CONTRACT_DIT_COORDINATOR_LIVE"))
+
+	// Create a new instance of the ditDemoCoordinator to access it
+	ditCoordinatorInstance, err := ditCoordinator.NewDitCoordinator(ditCoordinatorAddressObject, _connection)
+	if err != nil {
+		return nil, errors.New("Failed to find ditDemoCoordinator at provided address")
+	}
+
+	return ditCoordinatorInstance, nil
+}
+
+func getKNWVotingInstance(_connection *ethclient.Client) (*KNWVoting.KNWVoting, error) {
+	knwVotingAddressObject := common.HexToAddress(os.Getenv("CONTRACT_KNW_VOTING_LIVE"))
+
+	// Create a new instance of the KNWVoting contract to access it
+	KNWVotingInstance, err := KNWVoting.NewKNWVoting(knwVotingAddressObject, _connection)
+	if err != nil {
+		return nil, errors.New("Failed to find KNWVoting at provided address")
+	}
+
+	return KNWVotingInstance, nil
+}
+
+func getKNWTokenInstance(_connection *ethclient.Client) (*KNWToken.KNWToken, error) {
+	KNWTokenAddress := common.HexToAddress(os.Getenv("CONTRACT_KNW_TOKEN_LIVE"))
+
+	// Create a new instance of the KNWToken contract to access it
+	KNWTokenInstance, err := KNWToken.NewKNWToken(KNWTokenAddress, _connection)
+	if err != nil {
+		return nil, errors.New("Failed to find KNWToken at provided address")
+	}
+
+	return KNWTokenInstance, nil
+}
+
+// getConnection will return a connection to the ethereum blockchain
+func getConnection() (*ethclient.Client, error) {
+	connection, err := ethclient.Dial(os.Getenv("ETHEREUM_RPC"))
+	if err != nil {
+		if strings.Contains(err.Error(), "bad status") {
+			glog.Warning("Received a bad status from node, waiting for five seconds")
+			time.Sleep(5 * time.Second)
+			connection, err := getConnection()
+			return connection, err
+		}
+		return nil, err
+	}
+	return connection, nil
+}
