@@ -1,0 +1,2 @@
+# ditCraft Indexer
+Since our ditExplorer is essentially based on the idea of a dApp, we are performing a lot of web3-based calls. These calls tend to be veeeeerrryyyy slloooowwww. We don't want our users to suffer because of this - this is why we built the ditIndexer. A simple tool to index blockchain transactions and store them into a MongoDB. The ditExplorer then uses the (faster) MongoDB to display the blockchain data with simple calls instead of performing a lot of web3 calls.
