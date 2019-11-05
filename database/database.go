@@ -2,6 +2,8 @@ package database
 
 import (
 	"errors"
+	"fmt"
+	"hash/fnv"
 	"math/big"
 	"os"
 	"strings"
@@ -169,6 +171,14 @@ type NotificationProposalStarted struct {
 	RevealUntil       time.Time `json:"reveal_until" bson:"reveal_until"`
 }
 
+// LogEntry struct
+type LogEntry struct {
+	ID      string `json:"id" bson:"id"`
+	Address string `json:"address" bson:"address"`
+	Version string `json:"version" bson:"version"`
+	LogData string `json:"log_data" bson:"log_data"`
+}
+
 // Get returns a bson-byte array with the result of the database request
 func Get(collection string, key []string, operator []string, value []interface{}) ([][]byte, error) {
 	if len(key) != len(value) && (len(operator) == 0 || len(operator) == 1 || len(operator) == len(value)) {
@@ -268,6 +278,26 @@ func Update(collection string, whereKey string, whereValue interface{}, changeKe
 		return mgoErr
 	}
 	return nil
+}
+
+// StoreLog stores a new log entry into the database
+func StoreLog(_address string, _logData string, _version string) (string, error) {
+	var newLogEntry LogEntry
+	newLogEntry.Address = _address
+	newLogEntry.Version = _version
+	newLogEntry.LogData = _logData
+
+	dt := time.Now()
+	h := fnv.New32a()
+	h.Write([]byte(newLogEntry.Address + dt.Format("01-02-2006 15:04:05")))
+	id := fmt.Sprint(h.Sum32())
+	newLogEntry.ID = id
+
+	err := Insert("logs", newLogEntry)
+	if err != nil {
+		return "", err
+	}
+	return id, err
 }
 
 // GetRepoHashFromName func
@@ -372,7 +402,7 @@ func GetAddressFromID(_id string) (string, error) {
 		requestBson := bson.M{}
 		requestBson["twitter_id"] = bson.M{"$eq": _id}
 		return c.Find(requestBson).One(&bsonReturn)
-	}, "twitterbot")
+	})
 	if mgoErr != nil {
 		return "", mgoErr
 	}
@@ -386,36 +416,39 @@ func GetIDFromAddress(_address string) (string, error) {
 		requestBson := bson.M{}
 		requestBson["dit_address"] = bson.M{"$eq": _address}
 		return c.Find(requestBson).One(&bsonReturn)
-	}, "twitterbot")
+	})
 	if mgoErr != nil {
 		return "", mgoErr
 	}
 	return bsonReturn["twitter_id"].(string), nil
 }
 
-// // AddressExists func
-// func AddressExists(_address string) error {
-// 	var bsonReturn bson.M
-// 	mgoErr := MgoRequest("users", func(c *mgo.Collection) error {
-// 		requestBson := bson.M{}
-// 		requestBson["dit_address"] = bson.M{"$eq": _address}
-// 		return c.Find(requestBson).One(&bsonReturn)
-// 	}, "twitterbot")
-// 	if mgoErr != nil {
-// 		return mgoErr
-// 	}
-// 	if len(bsonReturn["twitter_id"].(string)) == 0 {
-// 		return errors.New("Not found")
-// 	}
-// 	return nil
-// }
+// AddressExists func
+func AddressExists(_address string) error {
+	var bsonReturn bson.M
+	mgoErr := MgoRequest("users", func(c *mgo.Collection) error {
+		requestBson := bson.M{}
+		requestBson["dit_address"] = bson.M{"$eq": _address}
+		return c.Find(requestBson).One(&bsonReturn)
+	})
+	if mgoErr != nil {
+		return mgoErr
+	}
+	if len(bsonReturn["twitter_id"].(string)) == 0 && len(bsonReturn["github_id"].(string)) == 0 {
+		return errors.New("Not found")
+	}
+	return nil
+}
 
 // APIKeyExists func
-func APIKeyExists(_key string) error {
+func APIKeyExists(_key string, _kycRights bool) error {
 	var bsonReturn bson.M
 	mgoErr := MgoRequest("api_keys", func(c *mgo.Collection) error {
 		requestBson := bson.M{}
 		requestBson["api_key"] = bson.M{"$eq": _key}
+		if _kycRights {
+			requestBson["has_kyc_right"] = bson.M{"$eq": _kycRights}
+		}
 		return c.Find(requestBson).One(&bsonReturn)
 	})
 	if mgoErr != nil {
@@ -525,7 +558,7 @@ func Notify(_repoHash string, _notification NotificationProposalStarted) error {
 			newNotification.TwitterID = user.TwitterID
 			mgoErr := MgoRequest("notifications", func(c *mgo.Collection) error {
 				return c.Insert(newNotification)
-			}, "twitterbot")
+			})
 			if mgoErr != nil {
 				return mgoErr
 			}

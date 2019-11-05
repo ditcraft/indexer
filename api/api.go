@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -21,42 +23,53 @@ import (
 var srv *http.Server
 
 type requestProposal struct {
-	APIKey            string `json:"api_key" bson:"api_key"`
-	Mode              string `json:"mode" bson:"mode"`
-	KNWVoteID         int    `json:"knw_vote_id" bson:"knw_vote_id"`
-	UserAddress       string `json:"user_address" bson:"user_address"`
-	UserTwitterHandle string `json:"user_twitter_handle" bson:"user_twitter_handle"`
-	UserIsProposer    bool   `json:"user_is_proposer" bson:"user_is_proposer"`
-	UserIsValidator   bool   `json:"user_is_validator" bson:"user_is_validator"`
-	SinceDate         string `json:"since_date" bson:"since_date"`
-	Amount            int    `json:"amount" bson:"amount"`
-	OnlyFinalized     bool   `json:"only_finalized" bson:"only_finalized"`
-	OnlyActive        bool   `json:"only_active" bson:"only_active"`
-	RepositoryName    string `json:"repository_name" bson:"repository_name"`
-	RepositoryHash    string `json:"repository_hash" bson:"repository_hash"`
+	APIKey          string `json:"api_key" bson:"api_key"`
+	Mode            string `json:"mode" bson:"mode"`
+	KNWVoteID       int    `json:"knw_vote_id" bson:"knw_vote_id"`
+	UserAddress     string `json:"user_address" bson:"user_address"`
+	UserTwitterID   string `json:"user_twitter_id" bson:"user_twitter_id"`
+	UserIsProposer  bool   `json:"user_is_proposer" bson:"user_is_proposer"`
+	UserIsValidator bool   `json:"user_is_validator" bson:"user_is_validator"`
+	SinceDate       string `json:"since_date" bson:"since_date"`
+	Amount          int    `json:"amount" bson:"amount"`
+	OnlyFinalized   bool   `json:"only_finalized" bson:"only_finalized"`
+	OnlyActive      bool   `json:"only_active" bson:"only_active"`
+	RepositoryName  string `json:"repository_name" bson:"repository_name"`
+	RepositoryHash  string `json:"repository_hash" bson:"repository_hash"`
 }
 
 type requestRepository struct {
-	APIKey            string `json:"api_key" bson:"api_key"`
-	Mode              string `json:"mode" bson:"mode"`
-	Name              string `json:"name" bson:"name"`
-	Hash              string `json:"hash" bson:"hash"`
-	Provider          string `json:"provider" bson:"provider"`
-	KnowledgeLabel    string `json:"knowledge_label" bson:"knowledge_label"`
-	UserAddress       string `json:"user_address" bson:"user_address"`
-	UserTwitterHandle string `json:"user_twitter_handle" bson:"user_twitter_handle"`
-	UserIsProposer    bool   `json:"user_is_proposer" bson:"user_is_proposer"`
-	UserIsValidator   bool   `json:"user_is_validator" bson:"user_is_validator"`
-	OnlyActive        bool   `json:"only_active" bson:"only_active"`
-	Amount            int    `json:"amount" bson:"amount"`
+	APIKey          string `json:"api_key" bson:"api_key"`
+	Mode            string `json:"mode" bson:"mode"`
+	Name            string `json:"name" bson:"name"`
+	Hash            string `json:"hash" bson:"hash"`
+	Provider        string `json:"provider" bson:"provider"`
+	KnowledgeLabel  string `json:"knowledge_label" bson:"knowledge_label"`
+	UserAddress     string `json:"user_address" bson:"user_address"`
+	UserTwitterID   string `json:"user_twitter_id" bson:"user_twitter_id"`
+	UserIsProposer  bool   `json:"user_is_proposer" bson:"user_is_proposer"`
+	UserIsValidator bool   `json:"user_is_validator" bson:"user_is_validator"`
+	OnlyActive      bool   `json:"only_active" bson:"only_active"`
+	Amount          int    `json:"amount" bson:"amount"`
 }
 
 type requestUser struct {
-	APIKey        string `json:"api_key" bson:"api_key"`
-	Mode          string `json:"mode" bson:"mode"`
-	Address       string `json:"address" bson:"address"`
-	TwitterHandle string `json:"twitter_handle" bson:"twitter_handle"`
-	TwitterID     string `json:"twitter_id" bson:"twitter_id"`
+	APIKey    string `json:"api_key" bson:"api_key"`
+	Mode      string `json:"mode" bson:"mode"`
+	Address   string `json:"address" bson:"address"`
+	TwitterID string `json:"twitter_id" bson:"twitter_id"`
+}
+
+type requestKYC struct {
+	APIKey  string `json:"api_key" bson:"api_key"`
+	Address string `json:"address" bson:"address"`
+}
+
+type sendLog struct {
+	APIKey  string `json:"api_key" bson:"api_key"`
+	Address string `json:"address" bson:"address"`
+	Version string `json:"version" bson:"version"`
+	LogData string `json:"log_data" bson:"log_data"`
 }
 
 type responseStatus struct {
@@ -65,10 +78,14 @@ type responseStatus struct {
 
 // Start the API listener
 func Start(address string, timeoutInSeconds int) {
+	logger := log.New(os.Stdout, "http: ", log.LstdFlags)
+
 	router := mux.NewRouter()
-	router.HandleFunc("/indexer/proposal", handleProposal)
-	router.HandleFunc("/indexer/user", handleUser)
-	router.HandleFunc("/indexer/repository", handleRepository)
+	router.HandleFunc("/api/proposal", handleProposal)
+	router.HandleFunc("/api/user", handleUser)
+	router.HandleFunc("/api/repository", handleRepository)
+	router.HandleFunc("/api/kyc", handleKYC)
+	router.HandleFunc("/api/uploadlog", handleLogUpload)
 	// router.HandleFunc("/indexer/metric", handleDeviceList)
 
 	srv = &http.Server{
@@ -78,6 +95,7 @@ func Start(address string, timeoutInSeconds int) {
 		ReadHeaderTimeout: time.Second * time.Duration(timeoutInSeconds),
 		IdleTimeout:       time.Second * time.Duration(timeoutInSeconds*4),
 		Handler:           router,
+		ErrorLog:          logger,
 	}
 	var listenErr error
 	go func() {
@@ -110,7 +128,7 @@ func handleProposal(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		err := validateAPIKey(request.APIKey)
+		err := validateAPIKey(request.APIKey, false)
 		if err != nil {
 			glog.Error(errors.New("Unauthorized access"))
 			returnErrorStatus(w, r, "unauthorized")
@@ -142,8 +160,8 @@ func handleProposal(w http.ResponseWriter, r *http.Request) {
 				} else if request.UserIsProposer && !request.UserIsValidator {
 					requestBson["proposer"] = bson.M{"$eq": request.UserAddress}
 				}
-			} else if len(request.UserTwitterHandle) > 0 {
-				address, err := database.GetAddressFromHandle(request.UserTwitterHandle)
+			} else if len(request.UserTwitterID) > 0 {
+				address, err := database.GetAddressFromID(request.UserTwitterID)
 				if err != nil {
 					glog.Error(err)
 				}
@@ -227,7 +245,7 @@ func handleRepository(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		err := validateAPIKey(request.APIKey)
+		err := validateAPIKey(request.APIKey, false)
 		if err != nil {
 			glog.Error(errors.New("Unauthorized access"))
 			returnErrorStatus(w, r, "unauthorized")
@@ -262,8 +280,8 @@ func handleRepository(w http.ResponseWriter, r *http.Request) {
 			if len(request.KnowledgeLabel) > 0 {
 				requestBson["knw_labels"] = request.KnowledgeLabel
 			}
-			if len(request.UserTwitterHandle) > 0 {
-				address, err := database.GetAddressFromHandle(request.UserTwitterHandle)
+			if len(request.UserTwitterID) > 0 {
+				address, err := database.GetAddressFromID(request.UserTwitterID)
 				if err != nil {
 					glog.Error(err)
 				} else {
@@ -330,18 +348,19 @@ func handleUser(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		err := validateAPIKey(request.APIKey)
+		err := validateAPIKey(request.APIKey, false)
 		if err != nil {
 			glog.Error(errors.New("Unauthorized access"))
 			returnErrorStatus(w, r, "unauthorized")
 			return
 		}
 
-		collection := "users_"
+		collection := "users"
+		subcollection := ""
 		if request.Mode == "live" {
-			collection += "live"
+			subcollection += "live"
 		} else if request.Mode == "demo" {
-			collection += "demo"
+			subcollection += "demo"
 		} else {
 			returnErrorStatus(w, r, "invalid mode")
 			return
@@ -351,11 +370,9 @@ func handleUser(w http.ResponseWriter, r *http.Request) {
 		mgoErr := database.MgoRequest(collection, func(c *mgo.Collection) error {
 			requestBson := bson.M{}
 			if len(request.Address) > 0 {
-				requestBson["address"] = bson.M{"$eq": request.Address}
+				requestBson["dit_address"] = bson.M{"$eq": request.Address}
 			} else if len(request.TwitterID) > 0 {
 				requestBson["twitter_id"] = bson.M{"$eq": request.TwitterID}
-			} else if len(request.TwitterHandle) > 0 {
-				requestBson["twitter_handle"] = bson.M{"$eq": request.TwitterHandle}
 			} else {
 				return errors.New("invalid request")
 			}
@@ -401,7 +418,117 @@ func handleUser(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func validateAPIKey(_apiKey string) error {
+func handleKYC(w http.ResponseWriter, r *http.Request) {
+	if r.ContentLength > 0 {
+		var request requestKYC
+		jsonErr := json.NewDecoder(r.Body).Decode(&request)
+		if jsonErr != nil {
+			glog.Error(jsonErr)
+			returnErrorStatus(w, r, "invalid request")
+			return
+		}
+
+		err := validateAPIKey(request.APIKey, true)
+		if err != nil {
+			glog.Error(errors.New("Unauthorized access"))
+			returnErrorStatus(w, r, "unauthorized")
+			return
+		}
+
+		if len(request.Address) != 42 || !strings.HasPrefix(request.Address, "0x") {
+			glog.Error(jsonErr)
+			returnErrorStatus(w, r, "error during kyc process")
+			return
+		}
+
+		// ethereum.Mutex.Lock()
+		// defer ethereum.Mutex.Unlock()
+
+		// err = ethereum.KYCPassed(request.Address, false)
+		// if err != nil {
+		// 	glog.Error(jsonErr)
+		// 	returnErrorStatus(w, r, "error during kyc process")
+		// 	return
+		// }
+
+		// err = ethereum.KYCPassed(request.Address, false)
+		// if err != nil {
+		// 	glog.Error(jsonErr)
+		// 	returnErrorStatus(w, r, "error during kyc process")
+		// 	return
+		// }
+
+		// err = ethereum.SendDitTokens(request.Address)
+		// if err != nil {
+		// 	glog.Error(jsonErr)
+		// 	returnErrorStatus(w, r, "error during kyc process")
+		// 	return
+		// }
+
+		// err = ethereum.SendXDaiCent(request.Address)
+		// if err != nil {
+		// 	glog.Error(jsonErr)
+		// 	returnErrorStatus(w, r, "error during kyc process")
+		// 	return
+		// }
+
+		time.Sleep(5 * time.Second)
+
+		var responseCode responseStatus
+		responseCode.Status = "ok"
+
+		jsonString, jsonErr := json.Marshal(responseCode)
+		if jsonErr != nil {
+			glog.Error(jsonErr)
+			returnErrorStatus(w, r, "error during processing")
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, string(jsonString))
+	}
+}
+
+func handleLogUpload(w http.ResponseWriter, r *http.Request) {
+	if r.ContentLength > 0 {
+		var sendLog sendLog
+		jsonErr := json.NewDecoder(r.Body).Decode(&sendLog)
+		if jsonErr != nil {
+			glog.Error(jsonErr)
+			returnErrorStatus(w, r, "invalid request")
+			return
+		}
+
+		err := validateAPIKey(sendLog.APIKey, true)
+		if err != nil {
+			glog.Error(errors.New("Unauthorized access"))
+			returnErrorStatus(w, r, "unauthorized")
+			return
+		}
+
+		id, err := database.StoreLog(sendLog.Address, sendLog.LogData, sendLog.Version)
+		if err != nil {
+			glog.Error(errors.New("Unauthorized access"))
+			returnErrorStatus(w, r, "unauthorized")
+			return
+		}
+
+		var responseCode responseStatus
+		responseCode.Status = id
+
+		jsonString, jsonErr := json.Marshal(responseCode)
+		if jsonErr != nil {
+			glog.Error(jsonErr)
+			returnErrorStatus(w, r, "error during processing")
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, string(jsonString))
+	}
+}
+
+func validateAPIKey(_apiKey string, _needsKycRights bool) error {
 	if len(_apiKey) == 130 {
 		hash := crypto.Keccak256Hash([]byte("api"))
 		bytesSignature, err := hex.DecodeString(_apiKey)
@@ -419,7 +546,7 @@ func validateAPIKey(_apiKey string) error {
 		return err
 	}
 
-	err := database.APIKeyExists(_apiKey)
+	err := database.APIKeyExists(_apiKey, _needsKycRights)
 	return err
 }
 

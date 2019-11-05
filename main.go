@@ -5,6 +5,7 @@ import (
 	"os"
 	"strconv"
 
+	"github.com/ditcraft/indexer/api"
 	"github.com/ditcraft/indexer/database"
 	"github.com/ditcraft/indexer/v2demo"
 	"github.com/ditcraft/indexer/v2live"
@@ -48,7 +49,7 @@ func main() {
 	go v2demo.GetOldEvents(int64(intLastBlock), currentBlock)
 	go v2live.GetOldEvents(int64(intLastBlock), currentBlock)
 
-	// go api.Start("server.ditcraft.io:3004", 10)
+	go api.Start("server.ditcraft.io:3004", 10)
 
 	select {}
 }
