@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/ditcraft/indexer/database"
+	"github.com/ditcraft/indexer/ethereum"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/golang/glog"
 	"github.com/gorilla/mux"
@@ -441,38 +442,38 @@ func handleKYC(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		// ethereum.Mutex.Lock()
-		// defer ethereum.Mutex.Unlock()
+		ethereum.Mutex.Lock()
+		defer ethereum.Mutex.Unlock()
 
-		// err = ethereum.KYCPassed(request.Address, false)
-		// if err != nil {
-		// 	glog.Error(jsonErr)
-		// 	returnErrorStatus(w, r, "error during kyc process")
-		// 	return
-		// }
+		err = ethereum.KYCPassed(request.Address, false)
+		if err != nil {
+			glog.Error(jsonErr)
+			returnErrorStatus(w, r, "error during kyc process")
+			return
+		}
 
-		// err = ethereum.KYCPassed(request.Address, false)
-		// if err != nil {
-		// 	glog.Error(jsonErr)
-		// 	returnErrorStatus(w, r, "error during kyc process")
-		// 	return
-		// }
+		err = ethereum.KYCPassed(request.Address, false)
+		if err != nil {
+			glog.Error(jsonErr)
+			returnErrorStatus(w, r, "error during kyc process")
+			return
+		}
 
-		// err = ethereum.SendDitTokens(request.Address)
-		// if err != nil {
-		// 	glog.Error(jsonErr)
-		// 	returnErrorStatus(w, r, "error during kyc process")
-		// 	return
-		// }
+		err = ethereum.SendDitTokens(request.Address)
+		if err != nil {
+			glog.Error(jsonErr)
+			returnErrorStatus(w, r, "error during kyc process")
+			return
+		}
 
-		// err = ethereum.SendXDaiCent(request.Address)
-		// if err != nil {
-		// 	glog.Error(jsonErr)
-		// 	returnErrorStatus(w, r, "error during kyc process")
-		// 	return
-		// }
+		err = ethereum.SendXDaiCent(request.Address)
+		if err != nil {
+			glog.Error(jsonErr)
+			returnErrorStatus(w, r, "error during kyc process")
+			return
+		}
 
-		time.Sleep(5 * time.Second)
+		// time.Sleep(5 * time.Second)
 
 		var responseCode responseStatus
 		responseCode.Status = "ok"

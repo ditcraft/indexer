@@ -64,7 +64,7 @@ type ProposalParticipants struct {
 // User struct
 type User struct {
 	DitAddress          string                  `json:"dit_address" bson:"dit_address"`
-	AuthorizedAddresses AuthorizedAddress       `json:"authorized_adresses" bson:"authorized_adresses"`
+	AuthorizedAddresses AuthorizedAddress       `json:"authorized_adresses" bson:"authorized_addresses"`
 	TwitterID           string                  `json:"twitter_id" bson:"twitter_id"`
 	GitHubID            string                  `json:"github_id" bson:"github_id"`
 	GitHubToken         string                  `json:"github_token" bson:"github_token"`
