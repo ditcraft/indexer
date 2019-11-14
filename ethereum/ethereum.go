@@ -344,13 +344,37 @@ func getDitCoordinatorInstance(_connection *ethclient.Client, _live bool) (*ditC
 	return ditCoordinatorInstance, nil
 }
 
+// // getConnection will return a connection to the ethereum blockchain
+// func getConnection() (*ethclient.Client, error) {
+// 	// Connecting to rinkeby via infura
+// 	connection, err := ethclient.Dial(os.Getenv("ETHEREUM_RPC"))
+// 	if err != nil {
+// 		return nil, errors.New("Failed to connect to the ethereum network")
+// 	}
+
+// 	return connection, nil
+// }
+
 // getConnection will return a connection to the ethereum blockchain
 func getConnection() (*ethclient.Client, error) {
-	// Connecting to rinkeby via infura
-	connection, err := ethclient.Dial(os.Getenv("ETHEREUM_RPC"))
-	if err != nil {
-		return nil, errors.New("Failed to connect to the ethereum network")
+	for i := 1; i <= 2; i++ {
+		connection, err := ethclient.Dial(os.Getenv("ETHEREUM_RPC_" + strconv.Itoa(i)))
+		if err != nil {
+			if i == 2 {
+				return nil, errors.New("Failed to connect to the ethereum network" + strconv.Itoa(i))
+			}
+		} else {
+			networkID, err := connection.NetworkID(context.Background())
+			if err != nil {
+				if i == 2 {
+					return nil, errors.New("Failed to connect to the ethereum network" + strconv.Itoa(i))
+				}
+			} else {
+				if networkID.Cmp(big.NewInt(100)) == 0 {
+					return connection, nil
+				}
+			}
+		}
 	}
-
-	return connection, nil
+	return nil, errors.New("Failed to connect to the ethereum network")
 }

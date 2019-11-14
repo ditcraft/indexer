@@ -1399,15 +1399,24 @@ func getKNWTokenInstance(_connection *ethclient.Client) (*KNWToken.KNWToken, err
 
 // getConnection will return a connection to the ethereum blockchain
 func getConnection() (*ethclient.Client, error) {
-	connection, err := ethclient.Dial(os.Getenv("ETHEREUM_RPC"))
-	if err != nil {
-		if strings.Contains(err.Error(), "bad status") {
-			glog.Warning("Received a bad status from node, waiting for five seconds")
-			time.Sleep(5 * time.Second)
-			connection, err := getConnection()
-			return connection, err
+	for i := 1; i <= 2; i++ {
+		connection, err := ethclient.Dial(os.Getenv("ETHEREUM_RPC_" + strconv.Itoa(i)))
+		if err != nil {
+			if i == 2 {
+				return nil, errors.New("Failed to connect to the ethereum network" + strconv.Itoa(i))
+			}
+		} else {
+			networkID, err := connection.NetworkID(context.Background())
+			if err != nil {
+				if i == 2 {
+					return nil, errors.New("Failed to connect to the ethereum network" + strconv.Itoa(i))
+				}
+			} else {
+				if networkID.Cmp(big.NewInt(100)) == 0 {
+					return connection, nil
+				}
+			}
 		}
-		return nil, err
 	}
-	return connection, nil
+	return nil, errors.New("Failed to connect to the ethereum network")
 }
