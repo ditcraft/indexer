@@ -428,7 +428,7 @@ func handleKYC(w http.ResponseWriter, r *http.Request) {
 			returnErrorStatus(w, r, "invalid request")
 			return
 		}
-
+		glog.Info("New KYC request from " + request.Address)
 		err := validateAPIKey(request.APIKey, true)
 		if err != nil {
 			glog.Error(errors.New("Unauthorized access"))
@@ -437,43 +437,12 @@ func handleKYC(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if len(request.Address) != 42 || !strings.HasPrefix(request.Address, "0x") {
-			glog.Error(jsonErr)
+			glog.Error(err)
 			returnErrorStatus(w, r, "error during kyc process")
 			return
 		}
 
-		ethereum.Mutex.Lock()
-		defer ethereum.Mutex.Unlock()
-
-		err = ethereum.KYCPassed(request.Address, false)
-		if err != nil {
-			glog.Error(jsonErr)
-			returnErrorStatus(w, r, "error during kyc process")
-			return
-		}
-
-		err = ethereum.KYCPassed(request.Address, false)
-		if err != nil {
-			glog.Error(jsonErr)
-			returnErrorStatus(w, r, "error during kyc process")
-			return
-		}
-
-		err = ethereum.SendDitTokens(request.Address)
-		if err != nil {
-			glog.Error(jsonErr)
-			returnErrorStatus(w, r, "error during kyc process")
-			return
-		}
-
-		err = ethereum.SendXDaiCent(request.Address)
-		if err != nil {
-			glog.Error(jsonErr)
-			returnErrorStatus(w, r, "error during kyc process")
-			return
-		}
-
-		// time.Sleep(5 * time.Second)
+		go triggerKYC(request.Address)
 
 		var responseCode responseStatus
 		responseCode.Status = "ok"
@@ -487,6 +456,36 @@ func handleKYC(w http.ResponseWriter, r *http.Request) {
 
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprintf(w, string(jsonString))
+
+	}
+}
+
+func triggerKYC(_address string) {
+	ethereum.Mutex.Lock()
+	defer ethereum.Mutex.Unlock()
+
+	err := ethereum.KYCPassed(_address, false)
+	if err != nil {
+		glog.Error(err)
+		return
+	}
+
+	err = ethereum.KYCPassed(_address, false)
+	if err != nil {
+		glog.Error(err)
+		return
+	}
+
+	err = ethereum.SendDitTokens(_address)
+	if err != nil {
+		glog.Error(err)
+		return
+	}
+
+	err = ethereum.SendXDaiCent(_address)
+	if err != nil {
+		glog.Error(err)
+		return
 	}
 }
 
