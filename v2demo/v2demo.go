@@ -944,6 +944,7 @@ func handleDitDemoCoordinatorPropose(event *types.Log, connection *ethclient.Cli
 	newNotification.Description = newProposal.Topic
 	newNotification.Identifier = newProposal.Identifier
 	newNotification.ProposerTwitterID = user.TwitterID
+	newNotification.ProposerGithubID = user.GitHubID
 	newNotification.RepositoryHash = repository.Hash
 	newNotification.RepositoryName = repository.Name
 	newNotification.CommitUntil = newProposal.CommitPhaseEnd

@@ -164,7 +164,8 @@ type NotificationProposalStarted struct {
 	RepositoryName    string    `json:"repository_name" bson:"repository_name"`
 	KNWVoteID         int       `json:"knw_vote_id" bson:"knw_vote_id"`
 	KnowledgeLabel    string    `json:"knowledge_label" bson:"knowledge_label"`
-	ProposerTwitterID string    `json:"proposer_twitter_handle" bson:"proposer_twitter_handle"`
+	ProposerTwitterID string    `json:"proposer_twitter_id" bson:"proposer_twitter_id"`
+	ProposerGithubID  string    `json:"proposer_github_handle" bson:"proposer_github_handle"`
 	Description       string    `json:"description" bson:"description"`
 	Identifier        string    `json:"identifier" bson:"identifier"`
 	CommitUntil       time.Time `json:"commit_until" bson:"commit_until"`
@@ -553,14 +554,16 @@ func Notify(_repoHash string, _notification NotificationProposalStarted) error {
 	}
 
 	for _, user := range users {
-		if user.TwitterID != _notification.ProposerTwitterID {
-			newNotification := _notification
-			newNotification.TwitterID = user.TwitterID
-			mgoErr := MgoRequest("notifications", func(c *mgo.Collection) error {
-				return c.Insert(newNotification)
-			})
-			if mgoErr != nil {
-				return mgoErr
+		if len(user.TwitterID) > 1 && user.TwitterID != _notification.ProposerTwitterID {
+			if len(user.GitHubID) == 0 || user.GitHubID != _notification.ProposerGithubID {
+				newNotification := _notification
+				newNotification.TwitterID = user.TwitterID
+				mgoErr := MgoRequest("notifications", func(c *mgo.Collection) error {
+					return c.Insert(newNotification)
+				})
+				if mgoErr != nil {
+					return mgoErr
+				}
 			}
 		}
 	}
